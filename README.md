@@ -1,6 +1,6 @@
 # 🦠 Pandemic RL — Meta PyTorch OpenEnv Hackathon
 
-A crash-proof reinforcement learning simulation that models pandemic containment across 3 cities.
+A crash-proof reinforcement learning system that models pandemic containment across 3 cities with 3 difficulty-tiered tasks.
 
 ## ▶️ How to Run
 
@@ -9,82 +9,115 @@ pip install -r requirements.txt
 python inference.py
 ```
 
-That's it. No setup, no configuration, no external services needed.
-
-## 📊 What It Does
-
-A simple 3-city pandemic simulation where an agent must contain an outbreak through quarantine and vaccination decisions:
-
-| City   | Initial Population | Initial Infected |
-|--------|--------------------|------------------|
-| City 0 | 1,000              | 50 (outbreak)    |
-| City 1 | 1,000              | 0                |
-| City 2 | 1,000              | 0                |
-
-**Actions available:** Do nothing, Quarantine (per city), Vaccinate (per city)
-
-The simulation runs for up to 50 steps. The agent is graded on containment success and survival rate.
-
-## 🌍 Environment Variables
-
-| Variable          | Purpose                  | Required |
-|-------------------|--------------------------|----------|
-| `API_BASE_URL`    | LLM API endpoint         | No       |
-| `MODEL_NAME`      | LLM model name           | No       |
-| `HF_TOKEN`        | Hugging Face auth token  | No       |
-| `LOCAL_IMAGE_NAME` | Local Docker image name | No       |
-
-All variables are **optional**. The system runs perfectly without any of them.
-
-## 🛡️ Fallback Safety System
-
-The system is designed to **never crash**, no matter what:
-
-```
-Attempt PPO Agent (requires torch + checkpoint)
-    └── fails? →
-Rule-Based Agent (heuristic, no dependencies)
-    └── fails? →
-Random Agent (pure stdlib)
-    └── fails? →
-Emergency Output (hardcoded valid log format)
+**Docker:**
+```bash
+docker build -t pandemic-rl .
+docker run pandemic-rl
 ```
 
-Every single operation is wrapped in `try/except`. If the entire `main()` function fails, a nuclear fallback prints a valid `START...END` log block.
+## 🌍 Environment Description
 
-## 📋 Output Format
+A 3-city SIR (Susceptible-Infected-Recovered) pandemic model. Each city has a population of 1,000. Disease spreads within cities and between cities via travel. The agent intervenes through quarantine and vaccination policies.
+
+### Observation Space
+
+**Type:** `Box(12)` — 12 continuous floats in `[0.0, 1.0]`
+
+| Index | Meaning                          |
+|-------|----------------------------------|
+| 0-3   | City 0: susceptible, infected, recovered, dead (÷1000) |
+| 4-7   | City 1: susceptible, infected, recovered, dead (÷1000) |
+| 8-11  | City 2: susceptible, infected, recovered, dead (÷1000) |
+
+### Action Space
+
+**Type:** `Discrete(7)`
+
+| Action | Effect               |
+|--------|----------------------|
+| 0      | Do nothing           |
+| 1      | Quarantine City 0    |
+| 2      | Quarantine City 1    |
+| 3      | Quarantine City 2    |
+| 4      | Vaccinate City 0     |
+| 5      | Vaccinate City 1     |
+| 6      | Vaccinate City 2     |
+
+### OpenEnv API
+
+```python
+from env.environment import PandemicEnv
+
+env = PandemicEnv(config={...}, seed=42)
+obs = env.reset()
+obs, reward, done, info = env.step(action)
+state = env.state()
+trajectory = env.get_trajectory()
+```
+
+## 📋 Tasks
+
+Three difficulty tiers using the same environment with different parameters:
+
+| Task | Infection Rate | Recovery | Death Rate | Initial Infected | Travel |
+|------|---------------|----------|------------|------------------|--------|
+| **TaskEasy** | 0.05 | 0.15 | 0.003 | 10 | 0.005 |
+| **TaskMedium** | 0.25 | 0.06 | 0.02 | 80 | 0.04 |
+| **TaskHard** | 0.55 | 0.025 | 0.04 | 200 | 0.10 |
+
+## 📊 Scoring Method
+
+`grade(trajectory, task) → float [0.0, 1.0]`
+
+| Component | Weight | Criteria |
+|-----------|--------|----------|
+| **Survival** | 50% | Final survival rate vs task threshold |
+| **Containment** | 30% | Whether infections reached zero |
+| **Death Penalty** | 20% | Total deaths vs maximum acceptable |
+
+Scoring is **deterministic** and **reproducible** (fixed seed=42).
+
+## 🛡️ Fallback Safety
 
 ```
-START
-Step 1: Config loaded | model=default | api=unset
-Step 2: Torch not available | using non-torch agent
-Step 3: Environment initialized | 3-city pandemic sim | max_steps=50
-Step 4: Agent initialized | type=RuleBasedAgent
-Step 5: Simulation complete | steps=50 | total_reward=42.31
-Step 6: Metrics | susceptible=2400 | infected=0 | recovered=520 | dead=30 | survival_rate=0.9898
-Step 7: Results | success=True | contained=True | grade=99.69 | letter=A | reward=42.31
-Step 8: LLM check | skipped (no API_BASE_URL)
-Step 9: Finished | elapsed=0.04s | agent=RuleBasedAgent | steps=50
-END
+PPO Agent (torch + checkpoint)
+  └─ fails → RuleBased Agent (heuristic)
+       └─ fails → Random Agent (stdlib only)
+            └─ fails → Emergency inline agent
 ```
+
+Every operation is `try/except` wrapped. Nuclear fallback prints valid `START...END` output even if `main()` itself crashes.
+
+**Key guarantees:**
+- **Deterministic evaluation** (seed=42) — identical output on every run
+- **Crash-proof fallback system** — zero-crash guarantee under any condition
+
+## 🌐 Environment Variables
+
+| Variable | Purpose | Required |
+|----------|---------|----------|
+| `API_BASE_URL` | LLM API endpoint | No |
+| `MODEL_NAME` | Model name | No |
+| `HF_TOKEN` | HF auth token | No |
+| `LOCAL_IMAGE_NAME` | Docker image | No |
+
+All optional. System works without any.
 
 ## 📁 Project Structure
 
 ```
-submission/
-├── inference.py       # Single entry point — everything is here
-├── requirements.txt   # numpy + requests (minimal)
-└── README.md          # This file
+├── inference.py          # Entry point — runs all 3 tasks
+├── openenv.yaml          # OpenEnv specification
+├── requirements.txt      # Dependencies
+├── Dockerfile            # Container support
+├── README.md             # This file
+└── env/
+    ├── __init__.py
+    ├── environment.py    # PandemicEnv (reset/step/state)
+    ├── tasks.py          # TaskEasy, TaskMedium, TaskHard
+    ├── grader.py         # grade(trajectory, task) → 0.0-1.0
+    └── agents.py         # PPO, RuleBased, Random + fallback factory
 ```
-
-## 🏗️ Architecture
-
-Everything lives in `inference.py` for maximum reliability:
-
-- **PandemicEnv** — SIR-like epidemic model across 3 cities with inter-city travel
-- **RuleBasedAgent** — Quarantines infected cities, vaccinates healthy ones
-- **PPOAgent** — Neural network agent (optional, requires torch + checkpoint)
-- **RandomAgent** — Uniform random action selection (ultimate fallback)
 
 ## 📜 License
 

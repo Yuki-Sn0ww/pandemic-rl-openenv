@@ -1,0 +1,73 @@
+# OpenEnv Specification — Pandemic RL
+name: pandemic-rl
+description: >
+  3-city pandemic simulation where an RL agent must contain disease outbreaks
+  through quarantine and vaccination interventions. Models SIR dynamics with
+  inter-city travel and configurable disease parameters.
+
+environment:
+  class: env.environment.PandemicEnv
+  observation_space:
+    type: Box
+    shape: [12]
+    low: 0.0
+    high: 1.0
+    description: >
+      12 floats — per city [susceptible, infected, recovered, dead],
+      each normalized by dividing by 1000.
+  action_space:
+    type: Discrete
+    n: 7
+    description: >
+      0: do nothing,
+      1-3: quarantine city 0/1/2,
+      4-6: vaccinate city 0/1/2
+  max_steps: 50
+  reward_range: [-150.0, 30.0]
+
+tasks:
+  - name: TaskEasy
+    description: Low infection, easy containment, high reward potential.
+    config:
+      infection_rate: 0.05
+      recovery_rate: 0.15
+      death_rate: 0.003
+      travel_rate: 0.005
+      initial_infected: 10
+      vaccination_rate: 0.10
+      quarantine_effectiveness: 0.15
+
+  - name: TaskMedium
+    description: Balanced spread, moderate difficulty. Requires strategy.
+    config:
+      infection_rate: 0.25
+      recovery_rate: 0.06
+      death_rate: 0.02
+      travel_rate: 0.04
+      initial_infected: 80
+      vaccination_rate: 0.03
+      quarantine_effectiveness: 0.35
+
+  - name: TaskHard
+    description: High infection, fast spread, low recovery. Extremely challenging.
+    config:
+      infection_rate: 0.55
+      recovery_rate: 0.025
+      death_rate: 0.05
+      travel_rate: 0.10
+      initial_infected: 200
+      vaccination_rate: 0.015
+      quarantine_effectiveness: 0.5
+
+grading:
+  method: env.grader.grade
+  score_range: [0.0, 1.0]
+  components:
+    survival: 0.5
+    containment: 0.3
+    death_penalty: 0.2
+
+baseline:
+  script: inference.py
+  agent: RuleBasedAgent
+  deterministic: true
