@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pandemic-rl"
+version = "0.1.0"
+description = "Pandemic RL OpenEnv Hackathon Project"
+authors = [{ name = "Dharmveer" }]
+dependencies = [
+    "numpy>=1.21.0",
+    "requests>=2.25.0",
+    "pyyaml>=6.0"
+]
