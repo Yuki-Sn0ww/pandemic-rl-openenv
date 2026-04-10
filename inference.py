@@ -5,224 +5,263 @@ Pandemic RL Inference — Meta PyTorch OpenEnv Hackathon
 Runs all 3 tasks (Easy/Medium/Hard), outputs strict OpenEnv log format.
 Single entry point: python inference.py
 
+Uses OpenAI client for LLM-based decision making.
+Falls back to rule-based heuristic if LLM fails.
+
 Output format per task:
   [START] task=<name> env=PandemicEnv model=<agent>
   [STEP] step=<n> action=<a> reward=<0.00> done=<true|false> error=<msg|null>
   [END] success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...>
-
-ZERO-CRASH guarantee: every operation wrapped in try/except.
 """
 
+import asyncio
 import os
-import sys
-import time
-import random
+import textwrap
+from typing import List, Optional
 
-# Ensure env/ package is importable
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+from openai import OpenAI
 
-# ── Safe optional imports ────────────────────────────────────────────────────
+from pandemic_rl.client import PandemicEnvClient
+from pandemic_rl.models import PandemicAction
+from env.tasks import ALL_TASKS
+from env.grader import grade
 
-TORCH_AVAILABLE = False
-try:
-    import torch
-    TORCH_AVAILABLE = True
-except Exception:
-    pass
+# ─── Environment Variables ───
+API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
+MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
+BENCHMARK = os.getenv("BENCHMARK", "pandemic_rl")
+IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")  # If using docker image
+TEMPERATURE = 0.7
+MAX_TOKENS = 50
+
+# ─── LLM System Prompt ───
+SYSTEM_PROMPT = textwrap.dedent(
+    """
+    You are a CDC health director managing a pandemic.
+    The simulation models 3 cities with Susceptible-Infected-Recovered-Dead populations.
+    Available actions:
+    0 = Do nothing
+    1, 2, 3 = Quarantine City 0, 1, or 2 (reduces infection spread but causes economic damage)
+    4, 5, 6 = Vaccinate City 0, 1, or 2 (moves susceptible to recovered directly)
+
+    Reply with exactly one integer (0-6) representing your chosen action.
+    """
+).strip()
 
 
-def clamp_reward(r):
-    """Clamp reward to [0, 1] range as required by spec."""
+# ─── Logging Functions (OpenEnv strict format) ───
+
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    error_val = error if error else "null"
+    done_val = str(done).lower()
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
+        flush=True,
+    )
+
+
+# ─── Helper Functions ───
+
+def build_user_prompt(step: int, obs, last_reward: float) -> str:
+    """Build the prompt sent to the LLM with current observation data."""
+    return textwrap.dedent(
+        f"""
+        Step: {step}
+        Observation (Susceptible/Infected/Recovered/Dead):
+        City 0: {obs.city_data[0]:.3f} / {obs.city_data[1]:.3f} / {obs.city_data[2]:.3f} / {obs.city_data[3]:.3f}
+        City 1: {obs.city_data[4]:.3f} / {obs.city_data[5]:.3f} / {obs.city_data[6]:.3f} / {obs.city_data[7]:.3f}
+        City 2: {obs.city_data[8]:.3f} / {obs.city_data[9]:.3f} / {obs.city_data[10]:.3f} / {obs.city_data[11]:.3f}
+
+        Total Stats:
+        Susceptible: {obs.susceptible}
+        Infected: {obs.infected}
+        Recovered: {obs.recovered}
+        Dead: {obs.dead}
+        Survival Rate: {obs.survival_rate:.2f}
+
+        Last reward: {last_reward:.2f}
+        Choose next action (0-6):
+        """
+    ).strip()
+
+
+def clamp_reward(r) -> float:
+    """Clamp reward to [0.0, 1.0] range."""
     try:
-        return round(max(0.0, min(1.0, float(r))), 2)
+        return max(0.0, min(1.0, float(r)))
     except Exception:
         return 0.0
 
 
-def run_task(task_def, agent, agent_name):
+def get_model_action(client: OpenAI, step: int, obs, last_reward: float) -> str:
     """
-    Run one task end-to-end, printing [START]/[STEP]/[END] lines.
-    Returns (success, score).
-    Never crashes — prints [END] on any error.
+    Query the LLM for an action decision.
+    Falls back to a rule-based heuristic if the LLM call fails.
     """
-    task_name = task_def.get("name", "Unknown")
-    rewards = []
+    user_prompt = build_user_prompt(step, obs, last_reward)
+    try:
+        completion = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=TEMPERATURE,
+            max_tokens=MAX_TOKENS,
+            stream=False,
+        )
+        text = (completion.choices[0].message.content or "").strip()
+        # Extract first valid digit (0-6) from response
+        for char in text:
+            if char.isdigit():
+                action = int(char)
+                if 0 <= action <= 6:
+                    return str(action)
+        return "0"
+    except Exception:
+        # Fallback: rule-based heuristic — quarantine most infected city
+        if obs.city_data[1] > 0.05:
+            return "1"
+        if obs.city_data[5] > 0.05:
+            return "2"
+        if obs.city_data[9] > 0.05:
+            return "3"
+        return "4"
 
-    print(f"[START] task={task_name} env=PandemicEnv model={agent_name}", flush=True)
+
+# ─── Task Runner ───
+
+async def run_task(task_def: dict, env_client: PandemicEnvClient, client: OpenAI) -> None:
+    """Run a single task: reset env, loop steps, grade, log results."""
+    task_name = task_def["name"]
+    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
+
+    rewards: List[float] = []
+    steps_taken = 0
+    score = 0.0
+    success = False
+    trajectory = []
 
     try:
-        from env.environment import PandemicEnv
-        from env.grader import grade
+        # Reset environment for this task
+        result = await env_client.reset(task_name=task_name)
+        obs = result.observation
+        last_reward = 0.0
 
-        env = PandemicEnv(config=task_def["config"], seed=task_def.get("seed", 42))
-        obs = env.reset()
-        done = False
-        steps = 0
-        max_steps = task_def["config"].get("max_steps", 50)
-        deadline = time.time() + 5.0  # 5s safety timeout
+        trajectory.append({
+            "step": 0,
+            "observation": obs.city_data,
+            "action": None,
+            "reward": 0.0,
+            "info": {
+                "susceptible": obs.susceptible,
+                "infected": obs.infected,
+                "recovered": obs.recovered,
+                "dead": obs.dead,
+                "survival_rate": obs.survival_rate,
+                "step": obs.step,
+            },
+        })
 
-        while not done and steps < max_steps:
-            if time.time() > deadline:
+        # Step loop (max 50 steps)
+        for step in range(1, 51):
+            if obs.done:
                 break
 
-            # Get action from agent
-            error_msg = "null"
+            # Get action from LLM (or fallback)
+            action_str = get_model_action(client, step, obs, last_reward)
             try:
-                action = agent.act(obs)
-                action = max(0, min(int(action), 6))
-            except Exception as e:
-                action = 0
-                error_msg = str(e)
+                action_int = int(action_str)
+            except ValueError:
+                action_int = 0
 
-            # Step environment
+            action = PandemicAction(action=action_int)
+
+            # Execute step
+            error = None
             try:
-                obs, reward, done, info = env.step(action)
-                r = clamp_reward(reward)
-                rewards.append(r)
-                steps += 1
-                print(
-                    f"[STEP] step={steps} action={action} "
-                    f"reward={r:.2f} done={'true' if done else 'false'} "
-                    f"error={error_msg}",
-                    flush=True,
-                )
+                result = await env_client.step(action)
+                obs = result.observation
+                reward = clamp_reward(result.reward or 0.0)
+                done = obs.done
             except Exception as e:
-                steps += 1
-                rewards.append(0.0)
-                print(
-                    f"[STEP] step={steps} action={action} "
-                    f"reward=0.00 done=true error={e}",
-                    flush=True,
-                )
+                error = str(e)
                 done = True
+                reward = 0.0
 
-        # Grade the trajectory
-        try:
-            trajectory = env.get_trajectory()
-            score = round(grade(trajectory, task_def), 4)
-        except Exception:
-            score = 0.0
+            rewards.append(reward)
+            steps_taken = step
+            last_reward = reward
 
-        reward_str = ",".join(f"{r:.2f}" for r in rewards)
-        print(
-            f"[END] success=true steps={steps} score={score} "
-            f"rewards={reward_str}",
-            flush=True,
-        )
-        return True, score
+            log_step(step=step, action=action_str, reward=reward, done=done, error=error)
+
+            trajectory.append({
+                "step": step,
+                "observation": obs.city_data,
+                "action": action_int,
+                "reward": reward,
+                "info": {
+                    "susceptible": obs.susceptible,
+                    "infected": obs.infected,
+                    "recovered": obs.recovered,
+                    "dead": obs.dead,
+                    "survival_rate": obs.survival_rate,
+                    "step": obs.step,
+                },
+            })
+
+            if done:
+                break
+
+        # Grade using full trajectory
+        score = grade(trajectory, task_def)
+        score = min(max(score, 0.0), 1.0)
+        success = score >= task_def.get("survival_threshold", 0.1)
 
     except Exception as e:
-        # Task-level failure — still print [END]
-        reward_str = ",".join(f"{r:.2f}" for r in rewards) if rewards else "0.00"
-        print(
-            f"[END] success=false steps={len(rewards)} score=0.0 "
-            f"rewards={reward_str}",
-            flush=True,
-        )
-        return False, 0.0
+        print(f"[DEBUG] Task {task_name} error: {e}", flush=True)
+        success = False
+
+    finally:
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 
-def main():
-    """Run all tasks sequentially with strict output format."""
+# ─── Main Entry Point ───
 
-    # ── Load tasks ────────────────────────────────────────────────────────
-    tasks = []
+async def main() -> None:
+    """Run all tasks sequentially against the OpenEnv server."""
+    # Initialize OpenAI client with HF-compatible API
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY or "DUMMY")
+
+    # Connect to the environment server via WebSocket
     try:
-        from env.tasks import ALL_TASKS
-        tasks = ALL_TASKS
-    except Exception:
-        # Inline fallback tasks
-        tasks = [
-            {
-                "name": "TaskEasy",
-                "config": {
-                    "max_steps": 50, "infection_rate": 0.05,
-                    "recovery_rate": 0.15, "death_rate": 0.003,
-                    "travel_rate": 0.005, "initial_infected": 10,
-                    "vaccination_rate": 0.10, "quarantine_effectiveness": 0.15,
-                },
-                "seed": 42, "survival_threshold": 0.90, "max_acceptable_deaths": 50,
-            },
-            {
-                "name": "TaskMedium",
-                "config": {
-                    "max_steps": 50, "infection_rate": 0.25,
-                    "recovery_rate": 0.06, "death_rate": 0.02,
-                    "travel_rate": 0.04, "initial_infected": 80,
-                    "vaccination_rate": 0.03, "quarantine_effectiveness": 0.35,
-                },
-                "seed": 42, "survival_threshold": 0.88, "max_acceptable_deaths": 150,
-            },
-            {
-                "name": "TaskHard",
-                "config": {
-                    "max_steps": 50, "infection_rate": 0.55,
-                    "recovery_rate": 0.025, "death_rate": 0.05,
-                    "travel_rate": 0.10, "initial_infected": 200,
-                    "vaccination_rate": 0.015, "quarantine_effectiveness": 0.5,
-                },
-                "seed": 42, "survival_threshold": 0.85, "max_acceptable_deaths": 200,
-            },
-        ]
-
-    # ── Initialize agent ──────────────────────────────────────────────────
-    agent = None
-    agent_name = "RandomAgent"
-    try:
-        ckpt = os.path.join(PROJECT_ROOT, "checkpoints", "ppo_pandemic.pt")
-        try:
-            from env.agents import create_agent
-            agent, agent_name = create_agent(checkpoint_path=ckpt)
-        except Exception:
-            from env.agents import RuleBasedAgent, RandomAgent
+        if IMAGE_NAME:
+            env_client = await PandemicEnvClient.from_docker_image(IMAGE_NAME)
             try:
-                agent = RuleBasedAgent()
-                agent_name = "RuleBasedAgent"
-            except Exception:
-                agent = RandomAgent()
-                agent_name = "RandomAgent"
-    except Exception:
-        # Emergency inline agent
-        class _EmergencyAgent:
-            name = "EmergencyAgent"
-            def act(self, obs):
-                return random.randint(0, 6)
-        agent = _EmergencyAgent()
-        agent_name = "EmergencyAgent"
+                for task in ALL_TASKS:
+                    await run_task(task, env_client, client)
+            finally:
+                await env_client.close()
+        else:
+            async with PandemicEnvClient(base_url="http://localhost:8000") as env:
+                for task in ALL_TASKS:
+                    await run_task(task, env, client)
+    except Exception as e:
+        print(f"[DEBUG] Fatal error: {e}", flush=True)
 
-    # ── Run all tasks ─────────────────────────────────────────────────────
-    for task_def in tasks:
-        try:
-            run_task(task_def, agent, agent_name)
-        except Exception:
-            # Should never reach here due to run_task's own safety,
-            # but just in case — print minimal [END]
-            print(
-                f"[END] success=false steps=0 score=0.0 rewards=0.00",
-                flush=True,
-            )
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# ENTRY POINT — nuclear crash guard, guaranteed exit(0)
-# ════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    try:
-        main()
-    except BaseException:
-        # If main() itself crashes, print minimal valid output for each task
-        try:
-            for name in ["TaskEasy", "TaskMedium", "TaskHard"]:
-                print(f"[START] task={name} env=PandemicEnv model=EmergencyFallback", flush=True)
-                print(f"[STEP] step=1 action=0 reward=0.00 done=true error=critical_failure", flush=True)
-                print(f"[END] success=false steps=1 score=0.0 rewards=0.00", flush=True)
-        except BaseException:
-            pass
-    finally:
-        try:
-            sys.exit(0)
-        except SystemExit:
-            pass
+    asyncio.run(main())
