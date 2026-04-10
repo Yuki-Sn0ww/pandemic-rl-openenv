@@ -1,3 +1,14 @@
+---
+title: Pandemic RL Simulation
+emoji: 🦠
+colorFrom: blue
+colorTo: purple
+sdk: gradio
+sdk_version: "4.44.1"
+python_version: "3.10"
+app_file: app.py
+pinned: false
+---
 # 🦠 Pandemic RL — Meta PyTorch OpenEnv Hackathon
 
 A crash-proof reinforcement learning system that models pandemic containment across 3 cities with 3 difficulty-tiered tasks.

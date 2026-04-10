@@ -2,12 +2,17 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install only core dependencies (no Gradio — headless evaluation only)
-RUN pip install --no-cache-dir numpy requests pyyaml
+# Install core + server dependencies
+RUN pip install --no-cache-dir numpy requests pyyaml fastapi uvicorn
 
 COPY env/ env/
+COPY server/ server/
 COPY inference.py .
 COPY openenv.yaml .
 
-# Evaluator runs: python inference.py
-CMD ["python", "inference.py"]
+# Expose server port
+EXPOSE 8000
+
+# Start the FastAPI server for Phase 2 evaluation
+# The evaluator sends HTTP requests to /reset, /step, /state
+CMD ["python", "-m", "uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "8000"]

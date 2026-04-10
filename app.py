@@ -12,25 +12,38 @@ env = None
 @app.post("/reset")
 def reset():
     global env
-    env = PandemicEnv(config=TASK_EASY["config"], seed=42)
-    obs = env.reset()
-    return {"observation": obs}
+    try:
+        env = PandemicEnv(config=TASK_EASY["config"], seed=42)
+        obs = env.reset()
+        return {"observation": obs}
+    except Exception as e:
+        return {"error": f"Failed to reset environment: {e}"}
 
 @app.post("/step")
 def step(action: int):
     global env
-    obs, reward, done, info = env.step(action)
-    return {
-        "observation": obs,
-        "reward": reward,
-        "done": done,
-        "info": info,
-    }
+    if env is None:
+        return {"error": "Environment not initialized. Call /reset first."}
+    try:
+        obs, reward, done, info = env.step(action)
+        return {
+            "observation": obs,
+            "reward": reward,
+            "done": done,
+            "info": info,
+        }
+    except Exception as e:
+        return {"error": f"Step failed: {e}"}
 
 @app.get("/state")
 def state():
     global env
-    return env.state()
+    if env is None:
+        return {"error": "Environment not initialized. Call /reset first."}
+    try:
+        return env.state()
+    except Exception as e:
+        return {"error": f"State retrieval failed: {e}"}
 
 
 # ----------- UI PART ----------- #
