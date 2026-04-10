@@ -44,7 +44,7 @@ class PandemicEnvClient(EnvClient[PandemicAction, PandemicObservation, PandemicS
 
     def _step_payload(self, action: PandemicAction) -> Dict[str, Any]:
         """Convert PandemicAction to the JSON dict expected by the server."""
-        return {"action": action.model_dump()}
+        return action.model_dump()
 
     def _parse_result(self, payload: Dict[str, Any]) -> StepResult[PandemicObservation]:
         """Convert server response to StepResult with typed observation."""

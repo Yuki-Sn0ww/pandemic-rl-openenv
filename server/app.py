@@ -19,6 +19,13 @@ app = create_app(
     PandemicObservation,
 )
 
+from fastapi.responses import RedirectResponse
+
+@app.get("/", include_in_schema=False)
+def read_root():
+    """Redirect the root URL to the API documentation."""
+    return RedirectResponse(url="/docs")
+
 
 def main():
     """Run the server directly."""
