@@ -1,4 +1,5 @@
 numpy>=1.21.0
 requests>=2.25.0
 pyyaml>=6.0
-gradio
+fastapi>=0.100.0
+uvicorn>=0.20.0

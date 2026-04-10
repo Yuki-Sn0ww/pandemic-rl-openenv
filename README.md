@@ -2,11 +2,10 @@
 title: Pandemic RL Simulation
 emoji: 🦠
 colorFrom: blue
-colorTo: purple
-sdk: gradio
-sdk_version: "4.44.1"
+colorTo: green
+sdk: docker
 python_version: "3.10"
-app_file: app.py
+app_port: 8000
 pinned: false
 ---
 # 🦠 Pandemic RL — Meta PyTorch OpenEnv Hackathon
@@ -15,15 +14,21 @@ A crash-proof reinforcement learning system that models pandemic containment acr
 
 ## ▶️ How to Run
 
+### Local
 ```bash
 pip install -r requirements.txt
 python inference.py
 ```
 
-**Docker:**
+### Docker
 ```bash
 docker build -t pandemic-rl .
-docker run pandemic-rl
+
+# Run inference
+docker run pandemic-rl python inference.py
+
+# Start API server
+docker run -p 8000:8000 pandemic-rl
 ```
 
 ## 🌍 Environment Description
@@ -66,6 +71,12 @@ state = env.state()
 trajectory = env.get_trajectory()
 ```
 
+**Server endpoints:**
+- `POST /reset` → Initialize/reset environment, returns observation
+- `POST /step?action=N` → Take action, returns observation, reward, done, info
+- `GET /state` → Returns full environment state
+- `GET /health` → JSON health check
+
 ## 📋 Tasks
 
 Three difficulty tiers using the same environment with different parameters:
@@ -74,7 +85,7 @@ Three difficulty tiers using the same environment with different parameters:
 |------|---------------|----------|------------|------------------|--------|
 | **TaskEasy** | 0.05 | 0.15 | 0.003 | 10 | 0.005 |
 | **TaskMedium** | 0.25 | 0.06 | 0.02 | 80 | 0.04 |
-| **TaskHard** | 0.55 | 0.025 | 0.04 | 200 | 0.10 |
+| **TaskHard** | 0.60 | 0.025 | 0.05 | 200 | 0.12 |
 
 ## 📊 Scoring Method
 
@@ -88,6 +99,18 @@ Three difficulty tiers using the same environment with different parameters:
 
 Scoring is **deterministic** and **reproducible** (fixed seed=42).
 
+## 📜 Inference Output Format
+
+```
+[START] task=TaskEasy env=PandemicEnv model=RuleBasedAgent
+[STEP] step=1 action=1 reward=0.99 done=false error=null
+[STEP] step=2 action=1 reward=0.99 done=false error=null
+...
+[END] success=true steps=50 score=0.997 rewards=0.99,0.99,...
+```
+
+Each task produces a `[START]` → `[STEP]` × N → `[END]` block. All 3 tasks run sequentially.
+
 ## 🛡️ Fallback Safety
 
 ```
@@ -97,37 +120,32 @@ PPO Agent (torch + checkpoint)
             └─ fails → Emergency inline agent
 ```
 
-Every operation is `try/except` wrapped. Nuclear fallback prints valid `START...END` output even if `main()` itself crashes.
+Every operation is `try/except` wrapped. Nuclear fallback prints valid `[START]...[END]` output even if `main()` itself crashes.
 
 **Key guarantees:**
 - **Deterministic evaluation** (seed=42) — identical output on every run
 - **Crash-proof fallback system** — zero-crash guarantee under any condition
-
-## 🌐 Environment Variables
-
-| Variable | Purpose | Required |
-|----------|---------|----------|
-| `API_BASE_URL` | LLM API endpoint | No |
-| `MODEL_NAME` | Model name | No |
-| `HF_TOKEN` | HF auth token | No |
-| `LOCAL_IMAGE_NAME` | Docker image | No |
-
-All optional. System works without any.
+- **Exit code 0** — always, under all circumstances
 
 ## 📁 Project Structure
 
 ```
-├── inference.py          # Entry point — runs all 3 tasks
+├── inference.py          # Entry point — runs all 3 tasks ([START]/[STEP]/[END])
+├── app.py                # Gradio UI (HF Space, not used in eval)
 ├── openenv.yaml          # OpenEnv specification
 ├── requirements.txt      # Dependencies
-├── Dockerfile            # Container support
+├── Dockerfile            # Docker container (server + inference)
+├── pyproject.toml        # Build config
 ├── README.md             # This file
-└── env/
+├── env/
+│   ├── __init__.py
+│   ├── environment.py    # PandemicEnv (reset/step/state)
+│   ├── tasks.py          # TaskEasy, TaskMedium, TaskHard
+│   ├── grader.py         # grade(trajectory, task) → 0.0-1.0
+│   └── agents.py         # PPO, RuleBased, Random + fallback factory
+└── server/
     ├── __init__.py
-    ├── environment.py    # PandemicEnv (reset/step/state)
-    ├── tasks.py          # TaskEasy, TaskMedium, TaskHard
-    ├── grader.py         # grade(trajectory, task) → 0.0-1.0
-    └── agents.py         # PPO, RuleBased, Random + fallback factory
+    └── app.py            # FastAPI server (OpenEnv API + Dashboard UI)
 ```
 
 ## 📜 License
